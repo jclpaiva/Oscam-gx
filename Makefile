@@ -65,6 +65,13 @@ STRIP = $(CROSS_DIR)$(CROSS)strip
 
 LDFLAGS = -Wl,--gc-sections
 
+TARGETHELP := $(shell $(CC) --target-help 2>&1)
+ifneq (,$(findstring sse2,$(TARGETHELP)))
+override CFLAGS += -fexpensive-optimizations -mmmx -msse -msse2 -msse3
+else
+override CFLAGS += -fexpensive-optimizations
+endif
+
 # The linker for powerpc have bug that prevents --gc-sections from working
 # Check for the linker version and if it matches disable --gc-sections
 # For more information about the bug see:
@@ -93,6 +100,7 @@ TARGET := $(shell $(CC) -dumpmachine 2>/dev/null)
 # Process USE_ variables
 DEFAULT_STAPI_LIB = -L./stapi -loscam_stapi
 DEFAULT_STAPI5_LIB = -L./stapi -loscam_stapi5
+DEFAULT_GXAPI_LIB = -L./extapi/goceed -loscam_gxapi
 DEFAULT_COOLAPI_LIB = -lnxp -lrt
 DEFAULT_COOLAPI2_LIB = -llnxUKAL -llnxcssUsr -llnxscsUsr -llnxnotifyqUsr -llnxplatUsr -lrt
 DEFAULT_SU980_LIB = -lentropic -lrt
@@ -161,6 +169,7 @@ $(eval $(call prepare_use_flags,STAPI,stapi))
 $(eval $(call prepare_use_flags,STAPI5,stapi5))
 $(eval $(call prepare_use_flags,COOLAPI,coolapi))
 $(eval $(call prepare_use_flags,COOLAPI2,coolapi2))
+$(eval $(call prepare_use_flags,GXAPI,gxapi))
 $(eval $(call prepare_use_flags,SU980,su980))
 $(eval $(call prepare_use_flags,AZBOX,azbox))
 $(eval $(call prepare_use_flags,MCA,mca))
@@ -259,6 +268,7 @@ SRC-$(CONFIG_CARDREADER_SMART) += csctapi/ifd_smartreader.c
 SRC-$(CONFIG_CARDREADER_STINGER) += csctapi/ifd_stinger.c
 SRC-$(CONFIG_CARDREADER_STAPI) += csctapi/ifd_stapi.c
 SRC-$(CONFIG_CARDREADER_STAPI5) += csctapi/ifd_stapi.c
+SRC-$(CONFIG_CARDREADER_GXAPI) += csctapi/ifd_gx.c
 
 SRC-$(CONFIG_LIB_MINILZO) += minilzo/minilzo.c
 
@@ -271,6 +281,30 @@ SRC-$(CONFIG_CS_CACHEEX) += module-cccam-cacheex.c
 SRC-$(CONFIG_MODULE_CCCAM) += module-cccam.c
 SRC-$(CONFIG_MODULE_CCCSHARE) += module-cccshare.c
 SRC-$(CONFIG_MODULE_CONSTCW) += module-constcw.c
+SRC-$(CONFIG_WITH_EMU) += module-emulator.c
+SRC-$(CONFIG_WITH_EMU) += module-emulator-osemu.c
+SRC-$(CONFIG_WITH_EMU) += module-emulator-streamserver.c
+SRC-$(CONFIG_WITH_EMU) += module-emulator-biss.c
+SRC-$(CONFIG_WITH_EMU) += module-emulator-cryptoworks.c
+SRC-$(CONFIG_WITH_EMU) += module-emulator-director.c
+SRC-$(CONFIG_WITH_EMU) += module-emulator-irdeto.c
+SRC-$(CONFIG_WITH_EMU) += module-emulator-nagravision.c
+SRC-$(CONFIG_WITH_EMU) += module-emulator-powervu.c
+SRC-$(CONFIG_WITH_EMU) += module-emulator-viaccess.c
+SRC-$(CONFIG_WITH_EMU) += ffdecsa/ffdecsa.c
+ifeq "$(CONFIG_WITH_EMU)" "y"
+ifeq "$(CONFIG_WITH_SOFTCAM)" "y"
+UNAME := $(shell uname -s)
+ifneq ($(UNAME),Darwin)
+ifndef ANDROID_NDK
+ifndef ANDROID_STANDALONE_TOOLCHAIN
+TOUCH_SK := $(shell touch SoftCam.Key)
+override LDFLAGS += -Wl,--format=binary -Wl,SoftCam.Key -Wl,--format=default
+endif
+endif
+endif
+endif
+endif
 SRC-$(CONFIG_CS_CACHEEX) += module-csp.c
 SRC-$(CONFIG_CW_CYCLE_CHECK) += module-cw-cycle-check.c
 SRC-$(CONFIG_WITH_AZBOX) += module-dvbapi-azbox.c
@@ -282,6 +316,7 @@ SRC-$(CONFIG_WITH_COOLAPI2) += module-dvbapi-coolapi.c
 SRC-$(CONFIG_WITH_SU980) += module-dvbapi-coolapi.c
 SRC-$(CONFIG_WITH_STAPI) += module-dvbapi-stapi.c
 SRC-$(CONFIG_WITH_STAPI5) += module-dvbapi-stapi5.c
+SRC-$(CONFIG_WITH_GXAPI) += module-dvbapi-gxapi.c
 SRC-$(CONFIG_HAVE_DVBAPI) += module-dvbapi-chancache.c
 SRC-$(CONFIG_HAVE_DVBAPI) += module-dvbapi.c
 SRC-$(CONFIG_MODULE_GBOX) += module-gbox-helper.c
@@ -371,7 +406,7 @@ SRC := $(subst config.c,$(OBJDIR)/config.c,$(SRC))
 # starts the compilation.
 all:
 	@./config.sh --use-flags "$(USE_FLAGS)" --objdir "$(OBJDIR)" --make-config.mak
-	@-mkdir -p $(OBJDIR)/cscrypt $(OBJDIR)/csctapi $(OBJDIR)/minilzo $(OBJDIR)/webif
+	@-mkdir -p $(OBJDIR)/cscrypt $(OBJDIR)/csctapi $(OBJDIR)/minilzo $(OBJDIR)/ffdecsa $(OBJDIR)/webif
 	@-printf "\
 +-------------------------------------------------------------------------------\n\
 | OSCam ver: $(VER) rev: $(SVN_REV) target: $(TARGET)\n\

@@ -10,6 +10,7 @@
 #include "module-dvbapi-mca.h"
 #include "module-dvbapi-coolapi.h"
 #include "module-dvbapi-stapi.h"
+#include "module-dvbapi-gxapi.h"
 #include "module-dvbapi-chancache.h"
 #include "module-stat.h"
 #include "oscam-chk.h"
@@ -373,6 +374,7 @@ static const struct box_devices devices[BOX_COUNT] =
 	/* sh4      (stapi)*/       { "/dev/stapi/",           "stpti4_ioctl", "stpti4_ioctl", "/tmp/camd.socket", STAPI    },
 #endif
 	/* coolstream*/             { "/dev/cnxt/",            "null",         "null",         "/tmp/camd.socket", COOLAPI  },
+	/* goceed   (gxapi)*/       { "/dev/",                 "gxav%d",       "gxav%d",       "/tmp/camd.socket", GXAPI    },
 };
 
 static int32_t selected_box = -1;
@@ -1043,6 +1045,29 @@ int32_t dvbapi_set_filter(int32_t demux_id, int32_t api, uint16_t pid, uint16_t 
 		}
 #endif
 
+#if defined(WITH_GXAPI)
+	case GXAPI:
+		{
+			gxapi_filter_open filteropen;
+			memset(&filteropen, 0, sizeof(filteropen));
+			filteropen.DemuxID = demux[demux_id].demux_index;
+			filteropen.FilterNum = n;
+			filteropen.DemuxNum = demux_id;
+			filteropen.Pid = pid;
+			filteropen.Depth = 16;
+			memcpy(filteropen.FilterData, filt, 16);
+			memcpy(filteropen.FilterMask, mask, 16);
+
+			ret = gxapi_open_filter(&filteropen, (unsigned int *)&filterfd);
+			if(ret < 0)
+			{
+				ret = -1; // error setting filter!
+			}
+
+		}
+		break;
+#endif
+
 		default:
 			break;
 	}
@@ -1238,6 +1263,13 @@ static int32_t dvbapi_detect_api(void)
 				if(selected_api == STAPI && stapi_open() == 0)
 				{
 					cs_log("ERROR: stapi: setting up stapi failed.");
+					return 0;
+				}
+#endif
+#if defined(WITH_GXAPI)
+				if(selected_api == GXAPI && gxdvbapi_init() != 0)
+				{
+					cs_log("ERROR: gxapi: setting up gxapi failed.");
 					return 0;
 				}
 #endif
@@ -1452,7 +1484,7 @@ uint16_t tunemm_caid_map(uint8_t direct, uint16_t caid, uint16_t srvid)
 
 int32_t dvbapi_stop_filter(int32_t demux_id, int32_t type, uint32_t msgid)
 {
-#if defined(WITH_COOLAPI) || defined(WITH_COOLAPI2)
+#if defined(WITH_COOLAPI) || defined(WITH_COOLAPI2) || defined(WITH_GXAPI)
 	// We prevented PAT and PMT from starting, so lets don't close them either.
 	if(type == TYPE_PAT || type == TYPE_PMT)
 	{
@@ -1561,6 +1593,17 @@ int32_t dvbapi_stop_filternum(int32_t demux_id, int32_t num, uint32_t msgid)
 					break;
 				}
 #endif
+#if defined(WITH_GXAPI)
+				case GXAPI:
+				{
+					retfilter = gxapi_close_filter((unsigned int)fd);
+					if(retfilter != 0)
+					{
+						retfilter = -1;
+					}
+					break;
+				}
+#endif
 				default:
 					break;
 			}
@@ -1585,7 +1628,7 @@ int32_t dvbapi_stop_filternum(int32_t demux_id, int32_t num, uint32_t msgid)
 			// on bad filterfd dont try to close!
 			if(!cfg.dvbapi_listenport && cfg.dvbapi_boxtype != BOXTYPE_PC_NODMX && errno != 9)
 			{
-				if(selected_api == STAPI)
+				if(selected_api == STAPI || selected_api == GXAPI)
 				{
 					retfd = 0; // stapi closes its own filter fd!
 				}
@@ -1771,7 +1814,7 @@ void dvbapi_start_sdt_filter(int32_t demux_id)
 
 void dvbapi_start_pat_filter(int32_t demux_id)
 {
-#if defined(WITH_COOLAPI) || defined(WITH_COOLAPI2)
+#if defined(WITH_COOLAPI) || defined(WITH_COOLAPI2) || defined(WITH_GXAPI)
 	// PAT-Filter breaks API and OSCAM for Coolstream.
 	// Don't use it
 	return;
@@ -1781,7 +1824,7 @@ void dvbapi_start_pat_filter(int32_t demux_id)
 
 void dvbapi_start_pmt_filter(int32_t demux_id)
 {
-#if defined(WITH_COOLAPI) || defined(WITH_COOLAPI2)
+#if defined(WITH_COOLAPI) || defined(WITH_COOLAPI2) || defined(WITH_GXAPI)
 	// PMT-Filter breaks API and OSCAM for Coolstream.
 	// Don't use it
 	return;
@@ -2348,6 +2391,57 @@ void dvbapi_set_pid(int32_t demux_id, int32_t num, uint32_t idx, bool enable, bo
 			break;
 #endif
 
+#if defined WITH_GXAPI
+	case GXAPI:
+		if(use_des == 0)
+		{
+			for(i = 0; i < CA_MAX; i++)
+			{
+				if(((demux[demux_id].ca_mask & (1 << i)) == (uint32_t) (1 << i)))
+				{
+					if(enable)
+					{
+						int ret = gxapi_get_slotid_by_pid(streampid, i);
+						if(ret == 0)
+						{
+							gxapi_desc_open descopen;
+							unsigned int desc_h;
+
+							descopen.DemuxID = i;
+							descopen.Pid = streampid;
+							descopen.Idx = idx;
+
+							ret = gxapi_open_desc(&descopen, &desc_h);
+							if(ret != 0)
+							{
+								cs_log_dbg(D_DVBAPI, "ERROR: Could not open desc demuxid = %d, stream id = %d", i, streampid);
+							}
+							else
+							{
+								cs_log_dbg(D_DVBAPI, "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOPEN DESC %d (%d %d)XXXXXXXXXXXXXX", desc_h, i, streampid);
+							}
+						}
+					}
+					else
+					{
+						unsigned int desc_h;
+						int ret = gxapi_get_desc_handle(i, streampid, &desc_h);
+						if(!ret)
+						{
+							cs_log_dbg(D_DVBAPI, "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCLOSE DESC %d (%d %d)XXXXXXXXXXXXXX", desc_h, i, streampid);
+							gxapi_close_desc(desc_h);
+						}
+						else
+						{
+							//cs_log_dbg(D_DVBAPI, "ERROR: Could not find desc demuxid = %d, stream id = %d", i, streampid);
+						}
+					}
+				}
+			}
+		}
+		break;
+#endif
+
 		default:
 			for(i = 0; i < CA_MAX; i++)
 			{
@@ -2633,6 +2727,8 @@ int32_t dvbapi_start_descrambling(int32_t demux_id, int32_t pid, int8_t checked,
 	er->vpid   = demux[demux_id].ECMpids[pid].VPID;
 	er->pmtpid = demux[demux_id].pmtpid;
 	er->onid   = demux[demux_id].onid;
+	er->tsid   = demux[demux_id].tsid;
+	er->ens    = demux[demux_id].ens;
 	er->msgid  = msgid;
 
 #ifdef WITH_STAPI5
@@ -2680,18 +2776,29 @@ int32_t dvbapi_start_descrambling(int32_t demux_id, int32_t pid, int8_t checked,
 		if(caid_is_fake(demux[demux_id].ECMpids[pid].CAID) || caid_is_biss_fixed(demux[demux_id].ECMpids[pid].CAID))
 		{
 			int32_t j, n;
-			er->ecmlen = 5;
+			er->ecmlen = 7;
 			er->ecm[0] = 0x80; // to pass the cache check it must be 0x80 or 0x81
 			er->ecm[1] = 0x00;
-			er->ecm[2] = 0x02;
+			er->ecm[2] = 0x04;
 			i2b_buf(2, er->srvid, er->ecm + 3);
+			i2b_buf(2, er->pmtpid, er->ecm + 5);
 
-			for(j = 0, n = 5; j < demux[demux_id].STREAMpidcount; j++, n += 2)
+			for(j = 0, n = 7; j < demux[demux_id].STREAMpidcount; j++, n += 2)
 			{
 				i2b_buf(2, demux[demux_id].STREAMpids[j], er->ecm + n);
 				er->ecm[2] += 2;
 				er->ecmlen += 2;
 			}
+
+			er->ens &= 0x0FFFFFFF; // clear top 4 bits (in case of DVB-T/C or garbage), prepare for flagging
+			er->ens |= 0xA0000000; // flag to emu: this is the namespace, not a pid
+
+			i2b_buf(2, er->tsid, er->ecm + er->ecmlen);     // place tsid after the last stream pid
+			i2b_buf(2, er->onid, er->ecm + er->ecmlen + 2); // place onid right after tsid
+			i2b_buf(4, er->ens, er->ecm + er->ecmlen + 4);  // place namespace at the end of the ecm
+
+			er->ecm[2] += 8;
+			er->ecmlen += 8;
 
 			cs_log("Demuxer %d trying to descramble PID %d CAID %04X PROVID %06X ECMPID %04X ANY CHID PMTPID %04X VPID %04X",
 				demux_id,
@@ -4480,7 +4587,7 @@ static void dvbapi_prepare_descrambling(int32_t demux_id, uint32_t msgid)
 		dvbapi_client->lastswitch = dvbapi_client->last = time((time_t *)0); // reset idle-Time & last switch
 	}
 
-#if defined(WITH_COOLAPI) || defined(WITH_COOLAPI2)
+#if defined(WITH_COOLAPI) || defined(WITH_COOLAPI2) || defined(WITH_GXAPI)
 		// Don't start and Stop EMM Filters over and over again if we are on FTA
 		if(dvbapi_client->last_caid == NO_CAID_VALUE)
 		{
@@ -6731,7 +6838,7 @@ static void *dvbapi_main_local(void *cli)
 				}
 
 				if(!cfg.dvbapi_listenport && cfg.dvbapi_boxtype != BOXTYPE_PC_NODMX
-					&& selected_api != STAPI && selected_api != COOLAPI)
+					&& selected_api != STAPI && selected_api != COOLAPI && selected_api != GXAPI)
 				{
 					pfd2[pfdcount].fd = demux[i].demux_fd[g].fd;
 					pfd2[pfdcount].events = (POLLIN | POLLPRI);
@@ -7277,6 +7384,84 @@ void dvbapi_write_cw(int32_t demux_id, int32_t pid, int32_t stream_id, uint8_t *
 				demux_id, n, ca_descr.index, demux[demux_id].ca_mask);
 
 			coolapi_write_cw(demux[demux_id].ca_mask, demux[demux_id].STREAMpids, demux[demux_id].STREAMpidcount, &ca_descr);
+
+#elif defined WITH_GXAPI
+			if(algo == CA_ALGO_DES)
+			{
+				int32_t i, j;
+
+				for(i = 0; i < CA_MAX; i++)
+				{
+					if(!(demux[demux_id].ca_mask & (1 << i)))
+					{
+						continue; // ca not in use by this demuxer!
+					}
+
+					for(j = 0; j < demux[demux_id].STREAMpidcount; j++)
+					{
+						if(j != stream_id)
+						{
+							continue;
+						}
+
+						ca_descr.index = demux[demux_id].STREAMpids[j];
+						ca_descr.parity = n;
+
+						memcpy(demux[demux_id].last_cw[stream_id][n], cw + (n * 8), 8);
+						memcpy(ca_descr.cw, cw + (n * 8), 8);
+
+						//cs_log_dbg(D_DVBAPI, "Demuxer %d writing %s part (%s) of controlword, replacing expired (%s)",
+						//			demux_id, (n == 1 ? "even" : "odd"), newcw, lastcw);
+
+						cs_log_dbg(D_DVBAPI, "Demuxer %d write cw%d index: %d (ca%d)", demux_id, n, ca_descr.index, i);
+
+						dvbapi_net_send(DVBAPI_CA_SET_DESCR, demux[demux_id].socket_fd, msgid, demux_id, -1 /*unused*/,
+								(unsigned char *)&ca_descr, NULL, NULL, demux[demux_id].client_proto_version);
+
+						if(cfg.dvbapi_extended_cw_api == 1)
+						{
+							ca_descr_mode.index = demux[demux_id].STREAMpids[j];
+							ca_descr_mode.algo = algo;
+							ca_descr_mode.cipher_mode = cipher_mode;
+
+							dvbapi_net_send(DVBAPI_CA_SET_DESCR_MODE, demux[demux_id].socket_fd, msgid, demux_id, -1 /*unused*/,
+									(unsigned char *)&ca_descr_mode, NULL, NULL, demux[demux_id].client_proto_version);
+						}
+					}
+				}
+			}
+			else
+			{
+				unsigned char oddcw[8] = { 0 }, evencw[8] = { 0 };
+				int32_t i, j;
+
+				if(n)
+				{
+					memcpy(oddcw, cw + (n * 8), 8);
+				}
+				else
+				{
+					memcpy(evencw, cw + (n * 8), 8);
+				}
+
+				for(i = 0; i < CA_MAX; i++)
+				{
+					if(((demux[demux_id].ca_mask & (1 << i)) == (uint32_t) (1 << i)))
+					{
+						for(j = 0; j < demux[demux_id].STREAMpidcount; j++)
+						{
+							if(demux[demux_id].ECMpids[pid].useMultipleIndices)
+							{
+								if(j != stream_id)
+								{
+									continue;
+								}
+							}
+							gxapi_set_desc(i, demux[demux_id].STREAMpids[j], oddcw, evencw);
+						}
+					}
+				}
+			}
 #else
 			int32_t i, j, write_cw = 0;
 			uint32_t usedidx, lastidx;
@@ -7439,7 +7624,7 @@ void dvbapi_write_cw(int32_t demux_id, int32_t pid, int32_t stream_id, uint8_t *
 #endif
 		}
 	}
-	cs_log_dbg(D_DVBAPI, "Using %d of %d total descramblers", ca_descramblers_used, ca_descramblers_total);
+	//cs_log_dbg(D_DVBAPI, "Using %d of %d total descramblers", ca_descramblers_used, ca_descramblers_total);
 }
 
 void delayer(ECM_REQUEST *er, uint32_t delay)
@@ -8167,7 +8352,7 @@ int32_t dvbapi_set_section_filter(int32_t demux_id, ECM_REQUEST *er, int32_t n)
 {
 	if(!er) { return -1; }
 
-	if(USE_OPENXCAS || (selected_api != DVBAPI_3 && selected_api != DVBAPI_1 && selected_api != STAPI) // only valid for dvbapi3, dvbapi1 and STAPI
+	if(USE_OPENXCAS || (selected_api != DVBAPI_3 && selected_api != DVBAPI_1 && selected_api != STAPI && selected_api != GXAPI) // only valid for dvbapi3, dvbapi1 and STAPI
 		|| (cfg.dvbapi_boxtype == BOXTYPE_IPBOX || cfg.dvbapi_boxtype == BOXTYPE_IPBOX_PMT)) // reported buggy using sectionfiltering after 1~4 hours -> for now disabled!
 	{
 		return 0;
@@ -8411,6 +8596,39 @@ int32_t dvbapi_activate_section_filter(int32_t demux_id, int32_t num, int32_t fd
 		}
 #endif
 
+#if defined(WITH_GXAPI)
+		case GXAPI:
+		{
+			gxapi_filter_open filteropen;
+			unsigned int filterfd;
+
+			memset(&filteropen, 0, sizeof(filteropen));
+			filteropen.DemuxID = demux[demux_id].demux_index;
+			filteropen.FilterNum = num;
+			filteropen.DemuxNum = demux_id;
+			filteropen.Pid = pid;
+			filteropen.Depth = 16;
+			memcpy(filteropen.FilterData, filter, 16);
+			memcpy(filteropen.FilterMask, mask, 16);
+
+			ret = gxapi_close_filter((unsigned int)fd);
+			if(ret != 0)
+			{
+				cs_log_dbg(D_DVBAPI, "Demuxer %d filter 0x%08x close failed", demux_id, fd);
+				return -1;
+			}
+
+			ret = gxapi_open_filter(&filteropen, &filterfd);
+			if(ret != 0)
+			{
+				cs_log_dbg(D_DVBAPI, "Demuxer %d pid 0x%08x open failed", demux_id, pid);
+				return -1;
+			}
+
+			demux[demux_id].demux_fd[num].fd = filterfd;
+			break;
+		}
+#endif
 		default:
 			break;
 	}
